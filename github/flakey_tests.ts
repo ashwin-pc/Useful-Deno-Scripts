@@ -3,6 +3,7 @@ import { parse } from "https://deno.land/std@0.192.0/flags/mod.ts";
 import { ensureDirSync } from "https://deno.land/std@0.141.0/fs/ensure_dir.ts";
 import type { Endpoints } from "npm:@octokit/types";
 import { Octokit } from "npm:@octokit/core";
+import { log } from "../utils/index.ts";
 
 type Args = {
   auth?: string;
@@ -10,6 +11,7 @@ type Args = {
   repo: string;
   useCache: boolean;
   limit: number;
+  branch?: string;
 };
 
 const args: Args = parse(Deno.args, {
@@ -29,10 +31,11 @@ const octokit = new Octokit({
 const owner = args.owner;
 const repo = args.repo;
 const useCache = args.useCache;
+const SPACER = "\n---\n";
 
-type workflowRuns =
+type WorkflowRuns =
   Endpoints["GET /repos/{owner}/{repo}/actions/runs"]["response"]["data"]["workflow_runs"];
-type jobs =
+type Jobs =
   Endpoints["GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs"]["response"]["data"]["jobs"];
 
 interface stats {
@@ -59,14 +62,14 @@ const getWorkflowRuns = async (
   props?: Partial<
     Endpoints["GET /repos/{owner}/{repo}/actions/runs"]["parameters"]
   >
-): Promise<workflowRuns> => {
+): Promise<WorkflowRuns> => {
   if (useCache) {
     return JSON.parse(await cache.get("workflowRuns.json"));
   }
   let page = 0;
   const allWorkflowRuns = [];
   while (true) {
-    console.log(`page: ${page}\r`);
+    log("Fetching workflow_runs for page:", page, "info");
     const response = await octokit.request(
       "GET /repos/{owner}/{repo}/actions/runs",
       {
@@ -74,6 +77,7 @@ const getWorkflowRuns = async (
         repo,
         per_page: args.limit < 100 ? args.limit : 100,
         page: page++,
+        branch: args.branch,
         ...props,
       }
     );
@@ -82,7 +86,8 @@ const getWorkflowRuns = async (
       break;
     }
 
-    allWorkflowRuns.push(...runs);
+    const filtered_runs = runs.filter((run) => run.event !== "issues");
+    allWorkflowRuns.push(...filtered_runs);
 
     if (allWorkflowRuns.length >= args.limit) {
       break;
@@ -98,7 +103,7 @@ const getWorkflowRuns = async (
 
 // Get all jobs for a workflow run
 const getWorkflowJobs = async (workflowRunId: number) => {
-  console.log(`Fetching jobs for workflowRunId:${workflowRunId}\r`);
+  log("Fetching jobs for workflowRunId", workflowRunId, "info");
 
   let page = 0;
   const allJobs = [];
@@ -125,9 +130,9 @@ const getWorkflowJobs = async (workflowRunId: number) => {
 };
 
 const getAllWorkflowJobs = async (
-  workflowRuns: workflowRuns
-): Promise<jobs> => {
-  const allJobs: jobs = [];
+  workflowRuns: WorkflowRuns
+): Promise<Jobs> => {
+  const allJobs: Jobs = [];
   if (useCache) {
     return JSON.parse(await cache.get("jobs.json"));
   }
@@ -144,13 +149,53 @@ const getAllWorkflowJobs = async (
   return allJobs;
 };
 
+const groupAndPrintStats = <T extends WorkflowRuns[number] | Jobs[number]>(
+  items: T[],
+  getKey: (item: T) => string
+) => {
+  // Group and count items by key
+  const groupedItems = items.reduce((acc: { [key: string]: stats }, item) => {
+    const key = getKey(item);
+    if (!acc[key]) {
+      acc[key] = {
+        total: 0,
+        failures: 0,
+      };
+    }
+    acc[key]["total"] += 1;
+
+    if (item.conclusion === "failure") {
+      acc[key]["failures"] += 1;
+    }
+    return acc;
+  }, {});
+
+  // Sort items by failure count
+  const sortedItems = Object.entries(groupedItems).sort(
+    (a, b) => b[1].failures - a[1].failures
+  );
+
+  // Print out results
+  log("By failure count:");
+  sortedItems.forEach(([itemName, stats]) => {
+    if (stats.failures === 0) {
+      return;
+    }
+
+    log(itemName, `${stats.failures} of ${stats.total}`, "log");
+  });
+};
+
+// ----- MAIN APP -----
+
 const main = async () => {
   const allWorkflowRuns = await getWorkflowRuns({
+    // Uncomment to filter failed workflow runs
     // status: "failure",
   });
 
   // % of failures in the workflow runs
-  const failures: workflowRuns = allWorkflowRuns.filter((workflowRun) => {
+  const failures: WorkflowRuns = allWorkflowRuns.filter((workflowRun) => {
     return workflowRun.conclusion === "failure";
   });
 
@@ -167,7 +212,7 @@ const main = async () => {
     {}
   );
 
-  console.log(`\nDistribution of workflow runs:`);
+  log(`\nDistribution of workflow runs:`);
 
   for (const [conclusion, count] of Object.entries(distribution)) {
     const colors = {
@@ -185,7 +230,15 @@ const main = async () => {
       `color: ${color}; font-weight: bold`
     );
   }
-  console.log("---");
+  console.log(SPACER);
+
+  // Group workflow runs by name and print stats
+  groupAndPrintStats(
+    allWorkflowRuns,
+    (workflowRun) => workflowRun.name || "No name"
+  );
+
+  console.log(SPACER);
 
   // get all jobs for each workflow run that failed
   const allJobs = await getAllWorkflowJobs(failures);
@@ -194,49 +247,23 @@ const main = async () => {
   const failedJobs = allJobs.filter((job) => {
     return job.conclusion === "failure";
   });
-  console.log(
-    `Jobs that failed in the failed workflows: ${failedJobs.length} of ${
+  log(
+    "Jobs that failed in the failed workflows:",
+    `${failedJobs.length} of ${allJobs.length} jobs or ${(
+      (failedJobs.length * 100) /
       allJobs.length
-    } jobs or ${((failedJobs.length * 100) / allJobs.length).toFixed(2)}%\n`
+    ).toFixed(2)}%`,
+    "log"
   );
+
+  console.log(SPACER);
 
   // Group jobs by name and failure count
-  const groupedJobs = allJobs.reduce((acc: { [key: string]: stats }, job) => {
-    const key = job.name.startsWith("Run backwards compatibility tests")
+  groupAndPrintStats(allJobs, (job) =>
+    job.name.startsWith("Run backwards compatibility tests")
       ? "Backwards compatibility tests on all versions"
-      : job.name;
-    if (!acc[key]) {
-      acc[key] = {
-        total: 0,
-        failures: 0,
-      };
-    }
-    acc[key]["total"] += 1;
-
-    if (job.conclusion === "failure") {
-      acc[key]["failures"] += 1;
-    }
-    return acc;
-  }, {});
-
-  // Sort jobs by failure percentage
-  const sortedJobs = Object.entries(groupedJobs).sort(
-    (a, b) => b[1].failures - a[1].failures
+      : job.name
   );
-
-  // Print out results
-  console.log("Jobs by failure count:");
-  sortedJobs.forEach(([jobName, stats]) => {
-    if (stats.failures === 0) {
-      return;
-    }
-
-    console.log(
-      jobName,
-      "\t",
-      `failures: ${stats.failures}, total: ${stats.total}`
-    );
-  });
 };
 
 main();

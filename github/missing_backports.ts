@@ -7,7 +7,7 @@ import {
   LabelEdge,
   PullRequest,
 } from "npm:@octokit/graphql-schema";
-import { removeMaybe } from "../utils/index.ts";
+import { removeMaybe, progress } from "../utils/index.ts";
 
 type Args = {
   auth?: string;
@@ -57,14 +57,6 @@ const log = (message: string, messageType?: MessageType) => {
   }
 
   console.log(`${colorCode}%s\x1b[0m`, `-- ${message}`);
-};
-
-const progress = async (message: string) => {
-  // Move the cursor to the beginning of the line and clear it
-  await Deno.stdout.write(new TextEncoder().encode("\x1B[0G\x1B[2K"));
-
-  // Update the current line
-  await Deno.stdout.write(new TextEncoder().encode(message));
 };
 
 const getAllPrs = async () => {
@@ -241,9 +233,9 @@ prsToValidate.forEach((pr) => {
       if (!missingBackports[pr.number]) {
         missingBackports[pr.number] = {
           pr,
-          verifyUrl: `https://github.com/opensearch-project/OpenSearch-Dashboards/pulls?q=${encodeURIComponent(
-            getSearchString(pr.title)
-          )}`,
+          verifyUrl: `https://github.com/${args.owner}/${
+            args.repo
+          }/pulls?q=${encodeURIComponent(getSearchString(pr.title))}`,
           labels: [],
         };
       }

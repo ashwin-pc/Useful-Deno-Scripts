@@ -153,12 +153,39 @@ const main = async () => {
   const failures: workflowRuns = allWorkflowRuns.filter((workflowRun) => {
     return workflowRun.conclusion === "failure";
   });
-  console.log(
-    `% of workflows that failed: ${(
-      (failures.length * 100) /
-      allWorkflowRuns.length
-    ).toFixed(2)}%`
+
+  const distribution = allWorkflowRuns.reduce(
+    (acc: { [key: string]: number }, workflowRun) => {
+      const conclusion =
+        workflowRun.conclusion || workflowRun.status || "No status";
+      if (!acc[conclusion]) {
+        acc[conclusion] = 0;
+      }
+      acc[conclusion] += 1;
+      return acc;
+    },
+    {}
   );
+
+  console.log(`\nDistribution of workflow runs:`);
+
+  for (const [conclusion, count] of Object.entries(distribution)) {
+    const colors = {
+      failure: "red",
+      success: "green",
+      skipped: "grey",
+      in_progress: "blue",
+    };
+    const color = colors[conclusion as keyof typeof colors] || "inherit";
+    console.log(
+      `%c${conclusion}: ${count}, ${(
+        (count * 100) /
+        allWorkflowRuns.length
+      ).toFixed(2)}%\r`,
+      `color: ${color}; font-weight: bold`
+    );
+  }
+  console.log("---");
 
   // get all jobs for each workflow run that failed
   const allJobs = await getAllWorkflowJobs(failures);
